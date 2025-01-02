@@ -46,22 +46,47 @@ public class DiscProjection : MonoBehaviour
         return transform;
     }
 
+    // Set the ellipse's axes lengths based on a known point lying on the ellipse and the aspect of the ellipse.
     static void SetEllipseAxesLengthsFromPointAndAspect(ref Ellipse ellipse, float2 point, float aspect)
     {
-        var t = math.atan2(point.y * aspect, point.x);
+        // Special cases: point lies on axes.
+        if (math.abs(point.x) < math.EPSILON)
+        {
+            ellipse.AxesLength = math.abs(new float2(point.y / aspect, point.y));
+            return;
+        }
+
+        if (math.abs(point.y) < math.EPSILON)
+        {
+            ellipse.AxesLength = math.abs(new float2(point.x, point.x * aspect));
+            return;
+        }
+
+        // We do not worry about aspect being zero. We never encounter this case.
+        var t = math.atan2(point.y, point.x * aspect);
         ellipse.AxesLength = new float2(point.x / math.cos(t), point.y / math.sin(t));
     }
 
+    // Normal to the ellipse at a point, in local ellipse coordinates.
+    // The normal points outwards.
     static float2 GetNormalAtPoint(in Ellipse ellipse, float2 p)
     {
         var a = ellipse.AxesLength.x;
         var b = ellipse.AxesLength.y;
+        var denom = b * b * p.x;
+        // Special case if x == 0 or if the ellipse's aspect is zero.
+        if (math.abs(denom) < math.EPSILON)
+        {
+            return new float2(0, p.y >= 0 ? 1 : -1);
+        }
+
         var slope = a * a * p.y / (b * b * p.x);
         var normal = math.normalize(new float2(1, slope));
         // Normal points outwards.
         return normal * (p.x >= 0 ? 1 : -1);
     }
 
+    // From world coordinates to local ellipse coordinates.
     // The point is assumed to lie on the ellipse's plane.
     static float2 GetPointInEllipseCoordinates(in Ellipse ellipse, float3 point)
     {
@@ -70,6 +95,7 @@ public class DiscProjection : MonoBehaviour
         return new float2(x, y);
     }
 
+    // From local ellipse coordinates to world coordinates.
     static float3 GetPointInWorldCoordinates(in Ellipse ellipse, float2 point)
     {
         return ellipse.Center + ellipse.MajorAxis * point.x + ellipse.MinorAxis * point.y;
@@ -90,8 +116,9 @@ public class DiscProjection : MonoBehaviour
 
         const float dotRadius = 0.04f;
 
+        // The ellipse aspect, the ratio of its minor axis length over its major axis length, in [0, 1].
         // angle between disc plane and line.
-        var majorOverMinor = 1.0f / math.abs(math.dot(lineDir, discNormal));
+        var aspect = math.abs(math.dot(lineDir, discNormal));
 
         var minorSemiAxis = math.cross(lineDir, transform.forward);
         var majorSemiAxis = math.cross(minorSemiAxis, discNormal);
@@ -139,36 +166,52 @@ public class DiscProjection : MonoBehaviour
             };
 
             var pointOnInnerEllipse = GetPointInEllipseCoordinates(in innerEllipse, discCenter);
-            SetEllipseAxesLengthsFromPointAndAspect(ref innerEllipse, pointOnInnerEllipse, majorOverMinor);
+            SetEllipseAxesLengthsFromPointAndAspect(ref innerEllipse, pointOnInnerEllipse, aspect);
 
             Gizmos.color = Color.cyan;
             Gizmos.DrawSphere(GetPointInWorldCoordinates(in innerEllipse, pointOnInnerEllipse), dotRadius);
 
             var outerEllipse = innerEllipse;
-            // Normal to inner ellipse at disc center.
+
+            // First guess of the outer ellipse, using the normal to the inner ellipse at disc center.
             var normal = GetNormalAtPoint(in innerEllipse, pointOnInnerEllipse);
+
+            // Special case: if the normal is alongside the major axis,
+            // the iterative procedure will stay stuck and not converge, so we apply a slight nudge.
+            const float epsilon = 1e-6f;
+            if (1.0f - math.abs(normal.x) < epsilon)
+            {
+                var cos = (1 - epsilon) * (normal.x >= 0 ? 1 : -1);
+                var sin = math.sin(math.acos(cos)) * (normal.y >= 0 ? 1 : -1);
+                normal = new float2(cos, sin);
+            }
+
             var pointOnOuterEllipse = pointOnInnerEllipse + normal * m_Radius;
-            SetEllipseAxesLengthsFromPointAndAspect(ref outerEllipse, pointOnOuterEllipse, majorOverMinor);
+            SetEllipseAxesLengthsFromPointAndAspect(ref outerEllipse, pointOnOuterEllipse, aspect);
 
             var restore = (float4x4)Handles.matrix;
+
             // Inner ellipse.
             Handles.matrix = math.mul(restore, GetEllipseTransform(in innerEllipse));
-            Handles.color = Color.magenta;
+            Handles.color = Color.grey;
             Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1);
+
             // Outer ellipse.
             Handles.matrix = math.mul(restore, GetEllipseTransform(in outerEllipse));
             Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1);
 
+            // Refine guess of the outer ellipse using the normal to the estimated outer ellipse.
             const int iterations = 8;
+            Color.RGBToHSV(Color.red, out var startHue, out _, out _);
+            Color.RGBToHSV(Color.green, out var endHue, out _, out _);
+
             for (var i = 0; i != iterations; ++i)
             {
-                var color = Color.yellow;
-                color.a = (1 + i) / (float)iterations;
-                Handles.color = color;
+                Handles.color = Color.HSVToRGB(math.lerp(startHue, endHue, (1 + i) / (float)iterations), 1, 1);
 
                 normal = GetNormalAtPoint(in innerEllipse, pointOnOuterEllipse);
                 pointOnOuterEllipse = pointOnInnerEllipse + normal * m_Radius;
-                SetEllipseAxesLengthsFromPointAndAspect(ref outerEllipse, pointOnOuterEllipse, majorOverMinor);
+                SetEllipseAxesLengthsFromPointAndAspect(ref outerEllipse, pointOnOuterEllipse, aspect);
 
                 Handles.matrix = restore;
                 Handles.DrawLine(discCenter, GetPointInWorldCoordinates(in outerEllipse, pointOnOuterEllipse));
@@ -179,13 +222,5 @@ public class DiscProjection : MonoBehaviour
 
             Handles.matrix = restore;
         }
-    }
-
-    void OnEnable()
-    {
-    }
-
-    void OnDisable()
-    {
     }
 }
