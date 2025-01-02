@@ -20,13 +20,59 @@ public class DiscProjection : MonoBehaviour
         float denom = math.dot(planeNormal, rayDirection);
         if (denom > 1e-6)
         {
-            var p0l0 = planePosition - rayOrigin;
-            t = math.dot(p0l0, planeNormal) / denom;
+            t = math.dot(planePosition - rayOrigin, planeNormal) / denom;
             return (t >= 0);
         }
 
         t = default;
         return false;
+    }
+
+    struct Ellipse
+    {
+        public float3 Center;
+        public float3 MajorAxis;
+        public float3 MinorAxis;
+        public float2 AxesLength;
+    }
+
+    static float4x4 GetEllipseTransform(in Ellipse ellipse)
+    {
+        var transform = float4x4.zero;
+        transform[0] = new float4(ellipse.MajorAxis * ellipse.AxesLength.x, 0);
+        transform[1] = new float4(ellipse.MinorAxis * ellipse.AxesLength.y, 0);
+        transform[2] = new float4(math.cross(ellipse.MajorAxis, ellipse.MinorAxis), 0);
+        transform[3] = new float4(ellipse.Center, 1);
+        return transform;
+    }
+
+    static void SetEllipseAxesLengthsFromPointAndAspect(ref Ellipse ellipse, float2 point, float aspect)
+    {
+        var t = math.atan2(point.y * aspect, point.x);
+        ellipse.AxesLength = new float2(point.x / math.cos(t), point.y / math.sin(t));
+    }
+
+    static float2 GetNormalAtPoint(in Ellipse ellipse, float2 p)
+    {
+        var a = ellipse.AxesLength.x;
+        var b = ellipse.AxesLength.y;
+        var slope = a * a * p.y / (b * b * p.x);
+        var normal = math.normalize(new float2(1, slope));
+        // Normal points outwards.
+        return normal * (p.x >= 0 ? 1 : -1);
+    }
+
+    // The point is assumed to lie on the ellipse's plane.
+    static float2 GetPointInEllipseCoordinates(in Ellipse ellipse, float3 point)
+    {
+        var x = math.dot(point - ellipse.Center, ellipse.MajorAxis);
+        var y = math.dot(point - ellipse.Center, ellipse.MinorAxis);
+        return new float2(x, y);
+    }
+
+    static float3 GetPointInWorldCoordinates(in Ellipse ellipse, float2 point)
+    {
+        return ellipse.Center + ellipse.MajorAxis * point.x + ellipse.MinorAxis * point.y;
     }
 
     void OnDrawGizmos()
@@ -53,6 +99,7 @@ public class DiscProjection : MonoBehaviour
         majorSemiAxis = math.normalize(majorSemiAxis);
 
         //var projCenter = ProjectOnLine(linePoint, lineDir, discCenter);
+        // TODO What if // to plane?
         IntersectPlane(discNormal, discCenter, linePoint, lineDir, out var t);
         var projCenter = linePoint + lineDir * t;
 
@@ -84,38 +131,32 @@ public class DiscProjection : MonoBehaviour
 
         // Ellipse proportions dictated by the angle formed by the disc plane with the line.
         {
-            // x, y -> project on axes.
-            var x = math.dot(discCenter - projCenter, majorSemiAxis);
-            var y = math.dot(discCenter - projCenter, minorSemiAxis);
-            var ti = math.atan2(y * majorOverMinor, x);
-            var ai = x / math.cos(ti);
-            var bi = y / math.sin(ti);
+            var innerEllipse = new Ellipse
+            {
+                Center = projCenter,
+                MajorAxis = majorSemiAxis,
+                MinorAxis = minorSemiAxis
+            };
 
-            // Normal to inner ellipse at disc center.
-            var normal = math.normalize(new float2(1, ai * ai * y / (bi * bi * x)));
-            var p = new float2(x, y) + normal * m_Radius * math.sign(x);
-            var p3d = projCenter + majorSemiAxis * p.x + minorSemiAxis * p.y;
+            var pointOnInnerEllipse = GetPointInEllipseCoordinates(in innerEllipse, discCenter);
+            SetEllipseAxesLengthsFromPointAndAspect(ref innerEllipse, pointOnInnerEllipse, majorOverMinor);
+
             Gizmos.color = Color.cyan;
-            Gizmos.DrawSphere(p3d, dotRadius);
+            Gizmos.DrawSphere(GetPointInWorldCoordinates(in innerEllipse, pointOnInnerEllipse), dotRadius);
 
-            var to = math.atan2(p.y * majorOverMinor, p.x);
-            var ao = p.x / math.cos(to);
-            var bo = p.y / math.sin(to);
+            var outerEllipse = innerEllipse;
+            // Normal to inner ellipse at disc center.
+            var normal = GetNormalAtPoint(in innerEllipse, pointOnInnerEllipse);
+            var pointOnOuterEllipse = pointOnInnerEllipse + normal * m_Radius;
+            SetEllipseAxesLengthsFromPointAndAspect(ref outerEllipse, pointOnOuterEllipse, majorOverMinor);
 
-            var restore = Handles.matrix;
+            var restore = (float4x4)Handles.matrix;
             // Inner ellipse.
-            var rotation = Matrix4x4.identity;
-            rotation.SetColumn(0, (Vector3)majorSemiAxis * ai);
-            rotation.SetColumn(1, (Vector3)minorSemiAxis * bi);
-            rotation.SetColumn(2, (Vector3)math.cross(majorSemiAxis, minorSemiAxis));
-            rotation.SetColumn(3, (Vector4)new float4(projCenter, 1));
-            Handles.matrix *= rotation;
+            Handles.matrix = math.mul(restore, GetEllipseTransform(in innerEllipse));
             Handles.color = Color.magenta;
             Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1);
             // Outer ellipse.
-            rotation.SetColumn(0, (Vector3)majorSemiAxis * ao);
-            rotation.SetColumn(1, (Vector3)minorSemiAxis * bo);
-            Handles.matrix = restore * rotation;
+            Handles.matrix = math.mul(restore, GetEllipseTransform(in outerEllipse));
             Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1);
 
             const int iterations = 8;
@@ -125,19 +166,14 @@ public class DiscProjection : MonoBehaviour
                 color.a = (1 + i) / (float)iterations;
                 Handles.color = color;
 
-                normal = math.normalize(new float2(1, ao * ao * p.y / (bo * bo * p.x)));
-                p = new float2(x, y) + normal * m_Radius * math.sign(x);
-                ;
-                to = math.atan2(p.y * majorOverMinor, p.x);
-                ao = p.x / math.cos(to);
-                bo = p.y / math.sin(to);
+                normal = GetNormalAtPoint(in innerEllipse, pointOnOuterEllipse);
+                pointOnOuterEllipse = pointOnInnerEllipse + normal * m_Radius;
+                SetEllipseAxesLengthsFromPointAndAspect(ref outerEllipse, pointOnOuterEllipse, majorOverMinor);
 
                 Handles.matrix = restore;
-                Handles.DrawLine(discCenter, projCenter + majorSemiAxis * p.x + minorSemiAxis * p.y);
+                Handles.DrawLine(discCenter, GetPointInWorldCoordinates(in outerEllipse, pointOnOuterEllipse));
 
-                rotation.SetColumn(0, (Vector3)majorSemiAxis * ao);
-                rotation.SetColumn(1, (Vector3)minorSemiAxis * bo);
-                Handles.matrix = restore * rotation;
+                Handles.matrix = math.mul(restore, GetEllipseTransform(in outerEllipse));
                 Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1);
             }
 
