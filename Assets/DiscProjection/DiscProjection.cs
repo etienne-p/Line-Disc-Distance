@@ -1,4 +1,3 @@
-using System;
 using Unity.Mathematics;
 using UnityEditor;
 using UnityEngine;
@@ -8,7 +7,6 @@ public class DiscProjection : MonoBehaviour
 {
     [SerializeField, Range(0, 1)] float m_Radius;
 
-    // TODO Project on RAY!
     static float3 ProjectOnRay(float3 rayOrigin, float3 rayDirection, float3 point)
     {
         return rayOrigin + rayDirection * math.dot(point - rayOrigin, rayDirection);
@@ -17,11 +15,11 @@ public class DiscProjection : MonoBehaviour
     bool IntersectPlane(float3 planeNormal, float3 planePosition, float3 rayOrigin, float3 rayDirection, out float t)
     {
         // Assuming vectors are all normalized
-        float denom = math.dot(planeNormal, rayDirection);
+        var denom = math.dot(planeNormal, rayDirection);
         if (denom > 1e-6)
         {
             t = math.dot(planePosition - rayOrigin, planeNormal) / denom;
-            return (t >= 0);
+            return t >= 0;
         }
 
         t = default;
@@ -138,21 +136,23 @@ public class DiscProjection : MonoBehaviour
 
         // Expected equal to disc center.
         var onEllipse = projOnMinor + projOnMajor - projCenter;
+        const float large = 1e4f;
 
         Handles.color = Color.yellow;
         Gizmos.color = Color.yellow;
         Gizmos.DrawSphere(linePoint, dotRadius);
         Handles.DrawLine(linePoint, linePoint + lineDir);
+        Handles.DrawDottedLine(linePoint - lineDir * large, linePoint + lineDir * large, 2);
 
         Handles.color = Color.cyan;
         Gizmos.color = Color.cyan;
         Gizmos.DrawSphere(discCenter, dotRadius);
         Handles.DrawWireDisc(discCenter, discNormal, m_Radius);
 
-        Gizmos.DrawSphere(projCenter, dotRadius * 0.5f);
-        Handles.color = Color.green;
-        Handles.DrawLine(projCenter, projCenter + minorSemiAxis);
-        Handles.DrawLine(projCenter, projCenter + majorSemiAxis);
+        Gizmos.DrawSphere(projCenter, dotRadius);
+        Handles.color = Color.cyan;
+        Handles.DrawLine(projCenter - majorSemiAxis * large, projCenter + majorSemiAxis * large);
+        Handles.DrawLine(projCenter - minorSemiAxis * large, projCenter + minorSemiAxis * large);
         Handles.DrawDottedLine(projOnMinor, onEllipse, 2);
         Handles.DrawDottedLine(projOnMajor, onEllipse, 2);
 
@@ -165,6 +165,7 @@ public class DiscProjection : MonoBehaviour
                 MinorAxis = minorSemiAxis
             };
 
+            // Initialize inner ellipse based on its known eccentricity and the disc center lying on it.
             var pointOnInnerEllipse = GetPointInEllipseCoordinates(in innerEllipse, discCenter);
             SetEllipseAxesLengthsFromPointAndAspect(ref innerEllipse, pointOnInnerEllipse, aspect);
 
@@ -201,7 +202,7 @@ public class DiscProjection : MonoBehaviour
             Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1);
 
             // Refine guess of the outer ellipse using the normal to the estimated outer ellipse.
-            const int iterations = 8;
+            const int iterations = 32;
             Color.RGBToHSV(Color.red, out var startHue, out _, out _);
             Color.RGBToHSV(Color.green, out var endHue, out _, out _);
 
@@ -209,7 +210,10 @@ public class DiscProjection : MonoBehaviour
             {
                 Handles.color = Color.HSVToRGB(math.lerp(startHue, endHue, (1 + i) / (float)iterations), 1, 1);
 
-                normal = GetNormalAtPoint(in innerEllipse, pointOnOuterEllipse);
+                // Update normal based on the outer ellipse and the point lying on it.
+                normal = GetNormalAtPoint(in outerEllipse, pointOnOuterEllipse);
+
+                // Update the outer ellipse based on the updated normal.
                 pointOnOuterEllipse = pointOnInnerEllipse + normal * m_Radius;
                 SetEllipseAxesLengthsFromPointAndAspect(ref outerEllipse, pointOnOuterEllipse, aspect);
 
